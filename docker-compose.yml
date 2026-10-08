@@ -1,0 +1,129 @@
+services:
+  flowpay-gateway:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Gateway/Dockerfile
+    container_name: flowpay-gateway
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      - flowpay-identity
+      - flowpay-wallet
+      - flowpay-ledger
+      - flowpay-transfers
+      - flowpay-notifications
+    networks:
+      - flowpay-network
+
+  flowpay-identity:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Identity/Dockerfile
+    container_name: flowpay-identity
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8081:8080"
+    depends_on:
+      flowpay-db:
+        condition: service_healthy
+    networks:
+      - flowpay-network
+
+  flowpay-wallet:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Wallet/Dockerfile
+    container_name: flowpay-wallet
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8082:8080"
+    depends_on:
+      flowpay-db:
+        condition: service_healthy
+    networks:
+      - flowpay-network
+
+  flowpay-ledger:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Ledger/Dockerfile
+    container_name: flowpay-ledger
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8083:8080"
+    depends_on:
+      flowpay-db:
+        condition: service_healthy
+    networks:
+      - flowpay-network
+
+  flowpay-transfers:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Transfers/Dockerfile
+    container_name: flowpay-transfers
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8084:8080"
+    depends_on:
+      flowpay-db:
+        condition: service_healthy
+    networks:
+      - flowpay-network
+
+  # No database dependency (yet) — doesn't need flowpay-db healthy first.
+  flowpay-notifications:
+    build:
+      context: .
+      dockerfile: services/FlowPay.Notifications/Dockerfile
+    container_name: flowpay-notifications
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_HTTP_PORTS=8080
+    ports:
+      - "8085:8080"
+    networks:
+      - flowpay-network
+
+  # Database-per-service on one Postgres instance for local dev (see
+  # infra/postgres/init-databases.sh). Not yet consumed by application code —
+  # scaffolded ahead of the data access layer because the PRD requires an
+  # immutable, durable ledger, which needs a real relational store.
+  flowpay-db:
+    image: postgres:16-alpine
+    container_name: flowpay-db
+    environment:
+      - POSTGRES_USER=flowpay
+      - POSTGRES_PASSWORD=flowpay
+      - POSTGRES_DB=flowpay
+      - POSTGRES_MULTIPLE_DATABASES=flowpay_identity,flowpay_wallet,flowpay_ledger,flowpay_transfers
+    ports:
+      - "5432:5432"
+    volumes:
+      - flowpay-db-data:/var/lib/postgresql/data
+      - ./infra/postgres/init-databases.sh:/docker-entrypoint-initdb.d/init-databases.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U flowpay -d flowpay"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - flowpay-network
+
+volumes:
+  flowpay-db-data:
+
+networks:
+  flowpay-network:
+    driver: bridge

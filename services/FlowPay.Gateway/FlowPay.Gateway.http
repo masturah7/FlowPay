@@ -1,0 +1,16 @@
+@FlowPayGateway_HostAddress = http://localhost:8080
+
+GET {{FlowPayGateway_HostAddress}}/health/live
+Accept: application/json
+
+###
+
+GET {{FlowPayGateway_HostAddress}}/health/ready
+Accept: application/json
+
+###
+
+GET {{FlowPayGateway_HostAddress}}/identity/api/v1/ping
+Accept: application/json
+
+###

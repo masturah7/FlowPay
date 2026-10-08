@@ -1,0 +1,9 @@
+<Solution>
+  <Project Path="shared/FlowPay.BuildingBlocks/FlowPay.BuildingBlocks.csproj" />
+  <Project Path="services/FlowPay.Gateway/FlowPay.Gateway.csproj" />
+  <Project Path="services/FlowPay.Identity/FlowPay.Identity.csproj" />
+  <Project Path="services/FlowPay.Wallet/FlowPay.Wallet.csproj" />
+  <Project Path="services/FlowPay.Ledger/FlowPay.Ledger.csproj" />
+  <Project Path="services/FlowPay.Transfers/FlowPay.Transfers.csproj" />
+  <Project Path="services/FlowPay.Notifications/FlowPay.Notifications.csproj" />
+</Solution>
