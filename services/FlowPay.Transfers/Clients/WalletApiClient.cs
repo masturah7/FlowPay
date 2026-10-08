@@ -35,6 +35,9 @@ public interface IWalletApiClient
 
     Task<WalletMutationResult> CreditAsync(
         Guid walletId, long amountMinorUnits, string currency, string idempotencyKey, CancellationToken cancellationToken);
+
+    /// <summary>Internal-only: resolves (and lazily creates) a platform-owned system wallet's id.</summary>
+    Task<Guid> GetOrCreateSystemWalletIdAsync(Guid systemAccountId, string currency, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -89,6 +92,23 @@ public class WalletApiClient(HttpClient httpClient, InternalApiKeyOptions intern
     public Task<WalletMutationResult> CreditAsync(
         Guid walletId, long amountMinorUnits, string currency, string idempotencyKey, CancellationToken cancellationToken) =>
         PostMutationAsync($"api/v1/internal/wallets/{walletId}/credit", amountMinorUnits, currency, idempotencyKey, cancellationToken);
+
+    public async Task<Guid> GetOrCreateSystemWalletIdAsync(
+        Guid systemAccountId, string currency, CancellationToken cancellationToken)
+    {
+        using var request = new HttpRequestMessage(HttpMethod.Post, "api/v1/internal/wallets/system")
+        {
+            Content = JsonContent.Create(new { SystemAccountId = systemAccountId, Currency = currency }),
+        };
+        AddInternalApiKey(request);
+
+        using var response = await httpClient.SendAsync(request, cancellationToken);
+        response.EnsureSuccessStatusCode();
+
+        var wallet = await response.Content.ReadFromJsonAsync<WalletDto>(JsonOptions, cancellationToken);
+
+        return wallet!.Id;
+    }
 
     private async Task<WalletMutationResult> PostMutationAsync(
         string path, long amountMinorUnits, string currency, string idempotencyKey, CancellationToken cancellationToken)

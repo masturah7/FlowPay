@@ -37,6 +37,7 @@ public class TransfersController(ITransferService transferService) : ControllerB
             accountId.Value,
             request.FromWalletId,
             request.ToWalletId,
+            request.ToBeneficiaryId,
             request.AmountMinorUnits,
             request.Currency,
             authorizationHeaderValue,
@@ -46,6 +47,10 @@ public class TransfersController(ITransferService transferService) : ControllerB
         return result.Outcome switch
         {
             CreateTransferOutcome.Completed => Ok(TransferResponse.From(result.Transfer!)),
+
+            // Honest, not a failure — simulated external settlement, see
+            // docs/epics/07-external-transfers-beneficiaries-fees-limits.md.
+            CreateTransferOutcome.SubmittedExternally => Ok(TransferResponse.From(result.Transfer!)),
 
             // Not a failure — the sender really was debited and it's
             // recorded in the ledger. 202 Accepted + an explicit status in
@@ -58,6 +63,16 @@ public class TransfersController(ITransferService transferService) : ControllerB
                 "Recipient wallet not found",
                 "The destination wallet does not exist.",
                 errorCode: nameof(CreateTransferOutcome.RecipientWalletNotFound)),
+            CreateTransferOutcome.BeneficiaryNotFound => this.ProblemWithErrorCode(
+                StatusCodes.Status404NotFound,
+                "Beneficiary not found",
+                "The beneficiary does not exist or does not belong to the caller.",
+                errorCode: nameof(CreateTransferOutcome.BeneficiaryNotFound)),
+            CreateTransferOutcome.InvalidDestination => this.ProblemWithErrorCode(
+                StatusCodes.Status400BadRequest,
+                "Invalid destination",
+                "Exactly one of toWalletId or toBeneficiaryId must be set.",
+                errorCode: nameof(CreateTransferOutcome.InvalidDestination)),
             CreateTransferOutcome.CurrencyMismatch => this.ProblemWithErrorCode(
                 StatusCodes.Status400BadRequest,
                 "Currency mismatch",
@@ -71,8 +86,18 @@ public class TransfersController(ITransferService transferService) : ControllerB
             CreateTransferOutcome.InsufficientFunds => this.ProblemWithErrorCode(
                 StatusCodes.Status400BadRequest,
                 "Insufficient funds",
-                "The source wallet does not have enough balance for this transfer.",
+                "The source wallet does not have enough balance for this transfer (including any fee).",
                 errorCode: nameof(CreateTransferOutcome.InsufficientFunds)),
+            CreateTransferOutcome.PerTransactionLimitExceeded => this.ProblemWithErrorCode(
+                StatusCodes.Status400BadRequest,
+                "Per-transaction limit exceeded",
+                "This transfer exceeds the maximum allowed amount per transaction.",
+                errorCode: nameof(CreateTransferOutcome.PerTransactionLimitExceeded)),
+            CreateTransferOutcome.DailyLimitExceeded => this.ProblemWithErrorCode(
+                StatusCodes.Status400BadRequest,
+                "Daily limit exceeded",
+                "This transfer would exceed the account's daily sending limit.",
+                errorCode: nameof(CreateTransferOutcome.DailyLimitExceeded)),
             CreateTransferOutcome.IdempotencyKeyConflict => this.ProblemWithErrorCode(
                 StatusCodes.Status409Conflict,
                 "Idempotency key conflict",

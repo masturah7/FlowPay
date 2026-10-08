@@ -1,6 +1,8 @@
 using FlowPay.BuildingBlocks;
+using FlowPay.Transfers;
 using FlowPay.Transfers.Clients;
 using FlowPay.Transfers.Data;
+using FlowPay.Transfers.Features.Beneficiaries;
 using FlowPay.Transfers.Features.Transfers;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,9 +22,15 @@ builder.Services.AddFlowPayProblemDetails();
 builder.Services.AddFlowPayJwtBearer(builder.Configuration);
 builder.Services.AddFlowPayInternalApiKey(builder.Configuration);
 
+var transferPolicyOptions = builder.Configuration.GetSection(TransferPolicyOptions.SectionName).Get<TransferPolicyOptions>()
+    ?? throw new InvalidOperationException($"Missing configuration section '{TransferPolicyOptions.SectionName}'.");
+builder.Services.AddSingleton(transferPolicyOptions);
+
 builder.Services.AddDbContext<TransfersDbContext>(options => options.UseNpgsql(connectionString));
 builder.Services.AddScoped<ITransferRepository, TransferRepository>();
 builder.Services.AddScoped<ITransferService, TransferService>();
+builder.Services.AddScoped<IBeneficiaryRepository, BeneficiaryRepository>();
+builder.Services.AddScoped<IBeneficiaryService, BeneficiaryService>();
 
 var walletBaseUrl = builder.Configuration["Services:Wallet"]
     ?? throw new InvalidOperationException("Missing configuration 'Services:Wallet'.");

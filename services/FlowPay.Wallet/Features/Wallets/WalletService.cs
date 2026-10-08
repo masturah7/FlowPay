@@ -42,6 +42,16 @@ public interface IWalletService
 
     Task<List<Domain.Wallet>> GetMineAsync(Guid accountId, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Internal-only: returns the wallet for (systemAccountId, currency),
+    /// creating it if it doesn't exist yet. For platform-owned wallets only
+    /// (see FlowPay.BuildingBlocks.SystemAccountIds) — not a general
+    /// get-or-create for customer wallets, which always go through the
+    /// ownership-checked CreateAsync.
+    /// </summary>
+    Task<Domain.Wallet> GetOrCreateSystemWalletAsync(
+        Guid systemAccountId, string currency, CancellationToken cancellationToken);
+
     Task<Domain.Wallet?> GetOwnedByIdAsync(Guid accountId, Guid walletId, CancellationToken cancellationToken);
 
     /// <summary>
@@ -138,6 +148,36 @@ public class WalletService(IWalletRepository walletRepository) : IWalletService
 
     public Task<List<Domain.Wallet>> GetMineAsync(Guid accountId, CancellationToken cancellationToken) =>
         walletRepository.GetByAccountIdAsync(accountId, cancellationToken);
+
+    public async Task<Domain.Wallet> GetOrCreateSystemWalletAsync(
+        Guid systemAccountId, string currency, CancellationToken cancellationToken)
+    {
+        var normalizedCurrency = NormalizeCurrency(currency);
+
+        var existing = await walletRepository.GetByAccountIdAsync(systemAccountId, cancellationToken);
+        var existingWallet = existing.Find(w => w.Currency == normalizedCurrency);
+
+        if (existingWallet is not null)
+        {
+            return existingWallet;
+        }
+
+        var createResult = await CreateAsync(systemAccountId, normalizedCurrency, cancellationToken);
+
+        if (createResult.Outcome == CreateWalletOutcome.Created)
+        {
+            return createResult.Wallet!;
+        }
+
+        // Lost a race with a concurrent get-or-create call for this same
+        // (systemAccountId, currency) — the wallet now exists, just not the
+        // one we tried to create.
+        var raceWinner = (await walletRepository.GetByAccountIdAsync(systemAccountId, cancellationToken))
+            .Find(w => w.Currency == normalizedCurrency);
+
+        return raceWinner ?? throw new InvalidOperationException(
+            "Expected a system wallet to exist after a unique-constraint conflict on (AccountId, Currency).");
+    }
 
     public async Task<Domain.Wallet?> GetOwnedByIdAsync(
         Guid accountId, Guid walletId, CancellationToken cancellationToken)

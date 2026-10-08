@@ -1,3 +1,4 @@
+using FlowPay.BuildingBlocks;
 using FlowPay.Transfers.Clients;
 using FlowPay.Transfers.Data;
 using FlowPay.Transfers.Domain;
@@ -8,6 +9,7 @@ namespace FlowPay.Transfers.Features.Transfers;
 public enum CreateTransferOutcome
 {
     Completed,
+    SubmittedExternally,
     PendingReconciliation,
     SourceWalletNotFound,
     RecipientWalletNotFound,
@@ -15,6 +17,15 @@ public enum CreateTransferOutcome
     SameWallet,
     InsufficientFunds,
     IdempotencyKeyConflict,
+
+    /// <summary>Neither or both of ToWalletId/ToBeneficiaryId were given.</summary>
+    InvalidDestination,
+
+    /// <summary>ToBeneficiaryId was given but doesn't exist or isn't owned by the caller.</summary>
+    BeneficiaryNotFound,
+
+    PerTransactionLimitExceeded,
+    DailyLimitExceeded,
 
     /// <summary>
     /// The debit step itself didn't complete cleanly (concurrency conflict,
@@ -31,7 +42,8 @@ public interface ITransferService
     Task<CreateTransferResult> CreateAsync(
         Guid accountId,
         Guid fromWalletId,
-        Guid toWalletId,
+        Guid? toWalletId,
+        Guid? toBeneficiaryId,
         long amountMinorUnits,
         string currency,
         string authorizationHeaderValue,
@@ -45,22 +57,28 @@ public interface ITransferService
 }
 
 /// <summary>
-/// Orchestrates one transfer across FlowPay.Wallet and FlowPay.Ledger. See
-/// docs/epics/05-transfers.md for the step order and what each failure mode
-/// means. This is the only place in the codebase that calls another
-/// service's API as part of a single business operation — keep the
-/// controller a thin wrapper around this.
+/// Orchestrates one transfer across FlowPay.Wallet, FlowPay.Ledger, and (for
+/// external transfers) a simulated settlement/fee leg. See
+/// docs/epics/05-transfers.md for the original step order and
+/// docs/epics/07-external-transfers-beneficiaries-fees-limits.md for
+/// destination resolution, limits, fees, and external transfers. This is the
+/// only place in the codebase that calls another service's API as part of a
+/// single business operation — keep the controller a thin wrapper around
+/// this.
 /// </summary>
 public class TransferService(
     ITransferRepository transferRepository,
+    IBeneficiaryRepository beneficiaryRepository,
     IWalletApiClient walletApiClient,
     ILedgerApiClient ledgerApiClient,
-    INotificationApiClient notificationApiClient) : ITransferService
+    INotificationApiClient notificationApiClient,
+    TransferPolicyOptions transferPolicyOptions) : ITransferService
 {
     public async Task<CreateTransferResult> CreateAsync(
         Guid accountId,
         Guid fromWalletId,
-        Guid toWalletId,
+        Guid? toWalletId,
+        Guid? toBeneficiaryId,
         long amountMinorUnits,
         string currency,
         string authorizationHeaderValue,
@@ -76,7 +94,8 @@ public class TransferService(
             var isSameRequest =
                 existing.AccountId == accountId &&
                 existing.FromWalletId == fromWalletId &&
-                existing.ToWalletId == toWalletId &&
+                existing.ToBeneficiaryId == toBeneficiaryId &&
+                (toBeneficiaryId is not null || existing.ToWalletId == toWalletId) &&
                 existing.AmountMinorUnits == amountMinorUnits &&
                 existing.Currency == normalizedCurrency;
 
@@ -85,17 +104,26 @@ public class TransferService(
                 return new CreateTransferResult(CreateTransferOutcome.IdempotencyKeyConflict, null);
             }
 
-            // Only Completed is truly terminal — replay it without
-            // touching anything else. Pending, Failed, and
-            // PendingReconciliation all re-run ExecuteAsync: every
-            // downstream call (debit/ledger/credit) is idempotent on the
-            // same key, so steps already done just no-op/replay, and a
+            // Only truly terminal outcomes replay as-is — everything else
+            // re-runs ExecuteAsync: every downstream call is idempotent on
+            // the same key, so steps already done just no-op/replay, and a
             // Failed transfer gets an honest fresh attempt rather than a
             // cached rejection that might no longer be accurate (e.g. the
             // sender now has sufficient funds).
-            return existing.Status == TransferStatus.Completed
-                ? new CreateTransferResult(CreateTransferOutcome.Completed, existing)
+            return existing.Status is TransferStatus.Completed or TransferStatus.SubmittedExternally
+                ? new CreateTransferResult(MapTerminalStatus(existing.Status), existing)
                 : await ExecuteAsync(existing, authorizationHeaderValue, cancellationToken);
+        }
+
+        var destination = await ResolveDestinationAsync(accountId, toWalletId, toBeneficiaryId, cancellationToken);
+
+        if (destination.Outcome != ResolveDestinationOutcome.Resolved)
+        {
+            return new CreateTransferResult(
+                destination.Outcome == ResolveDestinationOutcome.InvalidDestination
+                    ? CreateTransferOutcome.InvalidDestination
+                    : CreateTransferOutcome.BeneficiaryNotFound,
+                null);
         }
 
         var transfer = new Transfer
@@ -103,7 +131,11 @@ public class TransferService(
             Id = Guid.NewGuid(),
             AccountId = accountId,
             FromWalletId = fromWalletId,
-            ToWalletId = toWalletId,
+            DestinationType = destination.DestinationType,
+            ToBeneficiaryId = toBeneficiaryId,
+            ToWalletId = destination.WalletId,
+            ExternalBankName = destination.BankName,
+            ExternalBankAccountNumber = destination.BankAccountNumber,
             AmountMinorUnits = amountMinorUnits,
             Currency = normalizedCurrency,
             Status = TransferStatus.Pending,
@@ -127,8 +159,8 @@ public class TransferService(
                 ?? throw new InvalidOperationException(
                     "Expected a transfer to exist after a unique-constraint conflict on IdempotencyKey.");
 
-            return raceWinner.Status == TransferStatus.Completed
-                ? new CreateTransferResult(CreateTransferOutcome.Completed, raceWinner)
+            return raceWinner.Status is TransferStatus.Completed or TransferStatus.SubmittedExternally
+                ? new CreateTransferResult(MapTerminalStatus(raceWinner.Status), raceWinner)
                 : await ExecuteAsync(raceWinner, authorizationHeaderValue, cancellationToken);
         }
 
@@ -144,23 +176,99 @@ public class TransferService(
         return transfer is not null && transfer.AccountId == accountId ? transfer : null;
     }
 
+    private enum ResolveDestinationOutcome
+    {
+        Resolved,
+        InvalidDestination,
+        BeneficiaryNotFound,
+    }
+
+    private record ResolvedDestination(
+        ResolveDestinationOutcome Outcome,
+        TransferDestinationType DestinationType = default,
+        Guid? WalletId = null,
+        string? BankName = null,
+        string? BankAccountNumber = null);
+
+    private async Task<ResolvedDestination> ResolveDestinationAsync(
+        Guid accountId, Guid? toWalletId, Guid? toBeneficiaryId, CancellationToken cancellationToken)
+    {
+        if ((toWalletId is null) == (toBeneficiaryId is null))
+        {
+            return new ResolvedDestination(ResolveDestinationOutcome.InvalidDestination);
+        }
+
+        if (toWalletId is not null)
+        {
+            return new ResolvedDestination(
+                ResolveDestinationOutcome.Resolved, TransferDestinationType.InternalWallet, WalletId: toWalletId);
+        }
+
+        var beneficiary = await beneficiaryRepository.GetByIdAsync(toBeneficiaryId!.Value, cancellationToken);
+
+        if (beneficiary is null || beneficiary.AccountId != accountId)
+        {
+            return new ResolvedDestination(ResolveDestinationOutcome.BeneficiaryNotFound);
+        }
+
+        return beneficiary.Type == BeneficiaryType.InternalWallet
+            ? new ResolvedDestination(
+                ResolveDestinationOutcome.Resolved, TransferDestinationType.InternalWallet, WalletId: beneficiary.WalletId)
+            : new ResolvedDestination(
+                ResolveDestinationOutcome.Resolved,
+                TransferDestinationType.ExternalBank,
+                BankName: beneficiary.BankName,
+                BankAccountNumber: beneficiary.BankAccountNumber);
+    }
+
+    private static CreateTransferOutcome MapTerminalStatus(TransferStatus status) => status switch
+    {
+        TransferStatus.Completed => CreateTransferOutcome.Completed,
+        TransferStatus.SubmittedExternally => CreateTransferOutcome.SubmittedExternally,
+        _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Not a terminal success status."),
+    };
+
     private async Task<CreateTransferResult> ExecuteAsync(
         Transfer transfer, string authorizationHeaderValue, CancellationToken cancellationToken)
     {
-        if (transfer.FromWalletId == transfer.ToWalletId)
+        if (transfer.ToWalletId == transfer.FromWalletId)
         {
             return await FailAsync(
                 transfer, CreateTransferOutcome.SameWallet, "Cannot transfer a wallet to itself.", cancellationToken);
         }
 
+        if (transfer.AmountMinorUnits > transferPolicyOptions.MaxPerTransactionMinorUnits)
+        {
+            return await FailAsync(
+                transfer,
+                CreateTransferOutcome.PerTransactionLimitExceeded,
+                $"Amount exceeds the per-transaction limit of {transferPolicyOptions.MaxPerTransactionMinorUnits} minor units.",
+                cancellationToken);
+        }
+
+        var startOfUtcDay = new DateTimeOffset(DateOnly.FromDateTime(DateTime.UtcNow).ToDateTime(TimeOnly.MinValue), TimeSpan.Zero);
+        var sentToday = await transferRepository.GetSentAmountSinceAsync(
+            transfer.AccountId, startOfUtcDay, transfer.Id, cancellationToken);
+
+        if (sentToday + transfer.AmountMinorUnits > transferPolicyOptions.MaxDailyMinorUnits)
+        {
+            return await FailAsync(
+                transfer,
+                CreateTransferOutcome.DailyLimitExceeded,
+                $"This transfer would exceed the daily sending limit of {transferPolicyOptions.MaxDailyMinorUnits} minor units.",
+                cancellationToken);
+        }
+
+        var fee = transfer.DestinationType == TransferDestinationType.ExternalBank
+            ? transferPolicyOptions.ExternalTransferFeeMinorUnits
+            : 0;
+
         WalletDto? fromWallet;
-        WalletDto? toWallet;
 
         try
         {
             fromWallet = await walletApiClient.GetOwnedWalletAsync(
                 transfer.FromWalletId, authorizationHeaderValue, cancellationToken);
-            toWallet = await walletApiClient.GetWalletAsync(transfer.ToWalletId, cancellationToken);
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
@@ -169,7 +277,7 @@ public class TransferService(
             return await FailAsync(
                 transfer,
                 CreateTransferOutcome.DebitFailed,
-                $"Could not validate wallets before debit: {ex.Message}",
+                $"Could not validate the source wallet before debit: {ex.Message}",
                 cancellationToken);
         }
 
@@ -182,19 +290,77 @@ public class TransferService(
                 cancellationToken);
         }
 
-        if (toWallet is null)
+        Guid creditWalletId;
+        Guid? recipientAccountId = null;
+
+        if (transfer.DestinationType == TransferDestinationType.InternalWallet)
         {
-            return await FailAsync(
-                transfer, CreateTransferOutcome.RecipientWalletNotFound, "Recipient wallet not found.", cancellationToken);
+            WalletDto? toWallet;
+
+            try
+            {
+                toWallet = await walletApiClient.GetWalletAsync(transfer.ToWalletId!.Value, cancellationToken);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                return await FailAsync(
+                    transfer,
+                    CreateTransferOutcome.DebitFailed,
+                    $"Could not validate the recipient wallet before debit: {ex.Message}",
+                    cancellationToken);
+            }
+
+            if (toWallet is null)
+            {
+                return await FailAsync(
+                    transfer, CreateTransferOutcome.RecipientWalletNotFound, "Recipient wallet not found.", cancellationToken);
+            }
+
+            if (!string.Equals(fromWallet.Currency, transfer.Currency, StringComparison.Ordinal) ||
+                !string.Equals(toWallet.Currency, transfer.Currency, StringComparison.Ordinal))
+            {
+                return await FailAsync(
+                    transfer,
+                    CreateTransferOutcome.CurrencyMismatch,
+                    "Both wallets must match the transfer currency.",
+                    cancellationToken);
+            }
+
+            creditWalletId = toWallet.Id;
+            recipientAccountId = toWallet.AccountId;
+        }
+        else
+        {
+            if (!string.Equals(fromWallet.Currency, transfer.Currency, StringComparison.Ordinal))
+            {
+                return await FailAsync(
+                    transfer,
+                    CreateTransferOutcome.CurrencyMismatch,
+                    "Source wallet must match the transfer currency.",
+                    cancellationToken);
+            }
+
+            try
+            {
+                creditWalletId = await walletApiClient.GetOrCreateSystemWalletIdAsync(
+                    SystemAccountIds.ExternalSettlement, transfer.Currency, cancellationToken);
+            }
+            catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+            {
+                return await FailAsync(
+                    transfer,
+                    CreateTransferOutcome.DebitFailed,
+                    $"Could not resolve the external-settlement wallet before debit: {ex.Message}",
+                    cancellationToken);
+            }
         }
 
-        if (!string.Equals(fromWallet.Currency, transfer.Currency, StringComparison.Ordinal) ||
-            !string.Equals(toWallet.Currency, transfer.Currency, StringComparison.Ordinal))
+        if (fromWallet.BalanceMinorUnits < transfer.AmountMinorUnits + fee)
         {
             return await FailAsync(
                 transfer,
-                CreateTransferOutcome.CurrencyMismatch,
-                "Both wallets must match the transfer currency.",
+                CreateTransferOutcome.InsufficientFunds,
+                "Insufficient funds in source wallet for the transfer amount plus fee.",
                 cancellationToken);
         }
 
@@ -253,15 +419,12 @@ public class TransferService(
         // here on, money has left the sender; any failure (including the
         // HTTP calls themselves throwing) is a reconciliation concern, not
         // a clean rejection — we can no longer say nothing happened.
-        RecordTransferResult ledgerResult;
-        WalletMutationResult creditResult;
-
         try
         {
-            ledgerResult = await ledgerApiClient.RecordTransferAsync(
+            var ledgerResult = await ledgerApiClient.RecordTransferAsync(
                 transfer.Id,
                 transfer.FromWalletId,
-                transfer.ToWalletId,
+                creditWalletId,
                 transfer.AmountMinorUnits,
                 transfer.Currency,
                 transfer.IdempotencyKey,
@@ -273,8 +436,16 @@ public class TransferService(
                     transfer, $"Ledger recording failed after debit ({ledgerResult.Outcome}).", cancellationToken);
             }
 
-            creditResult = await walletApiClient.CreditAsync(
-                transfer.ToWalletId, transfer.AmountMinorUnits, transfer.Currency, transfer.IdempotencyKey, cancellationToken);
+            var creditResult = await walletApiClient.CreditAsync(
+                creditWalletId, transfer.AmountMinorUnits, transfer.Currency, transfer.IdempotencyKey, cancellationToken);
+
+            if (creditResult.Outcome != WalletMutationOutcome.Success)
+            {
+                return await ReconciliationNeededAsync(
+                    transfer,
+                    $"Recipient credit failed after debit+ledger ({creditResult.Outcome}).",
+                    cancellationToken);
+            }
         }
         catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
         {
@@ -282,33 +453,120 @@ public class TransferService(
                 transfer, $"Post-debit step did not complete: {ex.Message}", cancellationToken);
         }
 
-        if (creditResult.Outcome != WalletMutationOutcome.Success)
+        if (fee > 0)
         {
-            return await ReconciliationNeededAsync(
-                transfer,
-                $"Recipient credit failed after debit+ledger ({creditResult.Outcome}).",
-                cancellationToken);
+            var feeOutcome = await ChargeFeeAsync(transfer, fee, cancellationToken);
+
+            if (feeOutcome is not null)
+            {
+                return feeOutcome;
+            }
         }
 
-        transfer.Status = TransferStatus.Completed;
+        transfer.Status = transfer.DestinationType == TransferDestinationType.InternalWallet
+            ? TransferStatus.Completed
+            : TransferStatus.SubmittedExternally;
         transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await transferRepository.SaveChangesAsync(cancellationToken);
 
         await notificationApiClient.NotifyAsync(
             transfer.AccountId,
             NotificationType.TransferSent,
-            $"You sent {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
-            transfer.Id,
-            cancellationToken);
-        await notificationApiClient.NotifyAsync(
-            toWallet.AccountId,
-            NotificationType.TransferReceived,
-            $"You received {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
+            SenderSentMessage(transfer),
             transfer.Id,
             cancellationToken);
 
-        return new CreateTransferResult(CreateTransferOutcome.Completed, transfer);
+        if (recipientAccountId is not null)
+        {
+            await notificationApiClient.NotifyAsync(
+                recipientAccountId.Value,
+                NotificationType.TransferReceived,
+                $"You received {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
+                transfer.Id,
+                cancellationToken);
+        }
+
+        return new CreateTransferResult(MapTerminalStatus(transfer.Status), transfer);
     }
+
+    /// <summary>
+    /// The fee leg: a second, independent debit → ledger → credit cycle
+    /// (sender → FeeRevenue system wallet) with its own idempotency key and
+    /// ledger grouping reference, run only after the main transfer leg has
+    /// already succeeded. Returns null on success (caller continues to
+    /// Completed/SubmittedExternally); returns a PendingReconciliation
+    /// result if any step here fails — the main transfer already moved
+    /// money correctly, only the fee collection is in an unclear state.
+    /// </summary>
+    private async Task<CreateTransferResult?> ChargeFeeAsync(
+        Transfer transfer, long fee, CancellationToken cancellationToken)
+    {
+        transfer.FeeLedgerReference ??= Guid.NewGuid();
+        var feeIdempotencyKey = $"{transfer.IdempotencyKey}:fee";
+
+        try
+        {
+            var feeDebitResult = await walletApiClient.DebitAsync(
+                transfer.FromWalletId, fee, transfer.Currency, feeIdempotencyKey, cancellationToken);
+
+            if (feeDebitResult.Outcome != WalletMutationOutcome.Success)
+            {
+                return await ReconciliationNeededAsync(
+                    transfer,
+                    $"Main transfer succeeded but fee debit did not complete ({feeDebitResult.Outcome}).",
+                    cancellationToken);
+            }
+
+            var feeRevenueWalletId = await walletApiClient.GetOrCreateSystemWalletIdAsync(
+                SystemAccountIds.FeeRevenue, transfer.Currency, cancellationToken);
+
+            var feeLedgerResult = await ledgerApiClient.RecordTransferAsync(
+                transfer.FeeLedgerReference.Value,
+                transfer.FromWalletId,
+                feeRevenueWalletId,
+                fee,
+                transfer.Currency,
+                feeIdempotencyKey,
+                cancellationToken);
+
+            if (feeLedgerResult.Outcome != RecordTransferOutcome.Recorded)
+            {
+                return await ReconciliationNeededAsync(
+                    transfer, "Main transfer succeeded but fee ledger recording failed.", cancellationToken);
+            }
+
+            var feeCreditResult = await walletApiClient.CreditAsync(
+                feeRevenueWalletId, fee, transfer.Currency, feeIdempotencyKey, cancellationToken);
+
+            if (feeCreditResult.Outcome != WalletMutationOutcome.Success)
+            {
+                return await ReconciliationNeededAsync(
+                    transfer,
+                    $"Main transfer succeeded but fee revenue credit did not complete ({feeCreditResult.Outcome}).",
+                    cancellationToken);
+            }
+        }
+        catch (Exception ex) when (ex is HttpRequestException or TaskCanceledException)
+        {
+            return await ReconciliationNeededAsync(
+                transfer, $"Main transfer succeeded but the fee leg did not complete: {ex.Message}", cancellationToken);
+        }
+
+        transfer.FeeMinorUnits = fee;
+        return null;
+    }
+
+    private static string SenderSentMessage(Transfer transfer) => transfer.DestinationType switch
+    {
+        TransferDestinationType.InternalWallet =>
+            $"You sent {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
+        TransferDestinationType.ExternalBank =>
+            $"Your transfer of {transfer.AmountMinorUnits} {transfer.Currency} " +
+            $"(fee: {transfer.FeeMinorUnits} {transfer.Currency}) to {transfer.ExternalBankName} has been " +
+            $"submitted. This environment simulates external transfers — no real bank settlement occurs.",
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(transfer.DestinationType), transfer.DestinationType, "Unhandled TransferDestinationType."),
+    };
 
     private async Task<CreateTransferResult> FailAsync(
         Transfer transfer, CreateTransferOutcome outcome, string reason, CancellationToken cancellationToken)

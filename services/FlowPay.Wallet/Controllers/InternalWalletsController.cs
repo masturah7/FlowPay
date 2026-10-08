@@ -19,6 +19,17 @@ namespace FlowPay.Wallet.Controllers;
 [Route("api/v{version:apiVersion}/internal/wallets")]
 public class InternalWalletsController(IWalletService walletService) : ControllerBase
 {
+    [HttpPost("system")]
+    [ProducesResponseType(typeof(WalletResponse), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetOrCreateSystemWallet(
+        [FromBody] GetOrCreateSystemWalletRequest request, CancellationToken cancellationToken)
+    {
+        var wallet = await walletService.GetOrCreateSystemWalletAsync(
+            request.SystemAccountId, request.Currency, cancellationToken);
+
+        return Ok(WalletResponse.From(wallet));
+    }
+
     [HttpGet("{id:guid}")]
     [ProducesResponseType(typeof(WalletResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
