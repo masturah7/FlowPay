@@ -3,7 +3,9 @@ namespace FlowPay.Identity.Domain;
 public enum AccountStatus
 {
     PendingVerification,
+    UnderReview,
     Verified,
+    Rejected,
     Suspended,
 }
 

@@ -3,6 +3,7 @@ using FlowPay.Identity.Data;
 using FlowPay.Identity.Domain;
 using FlowPay.Identity.Features.Accounts;
 using FlowPay.Identity.Features.Auth;
+using FlowPay.Identity.Features.Kyc;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -20,6 +21,7 @@ builder.Services.AddOpenApi();
 builder.Services.AddFlowPayApiVersioning();
 builder.Services.AddFlowPayProblemDetails();
 builder.Services.AddFlowPayJwtBearer(builder.Configuration);
+builder.Services.AddFlowPayInternalApiKey(builder.Configuration);
 
 builder.Services.AddDbContext<IdentityDbContext>(options => options.UseNpgsql(connectionString));
 builder.Services.AddScoped<IPasswordHasher<Account>, PasswordHasher<Account>>();
@@ -27,6 +29,8 @@ builder.Services.AddScoped<IAccountRepository, AccountRepository>();
 builder.Services.AddScoped<IAccountService, AccountService>();
 builder.Services.AddScoped<IJwtTokenGenerator, JwtTokenGenerator>();
 builder.Services.AddScoped<IAuthService, AuthService>();
+builder.Services.AddScoped<IKycSubmissionRepository, KycSubmissionRepository>();
+builder.Services.AddScoped<IKycService, KycService>();
 
 builder.Services.AddFlowPayHealthChecks()
     .AddNpgSql(connectionString, name: "postgres", tags: new[] { FlowPayPlatform.ReadyTag });
