@@ -33,6 +33,12 @@ public enum CreateTransferOutcome
     /// the same Idempotency-Key.
     /// </summary>
     DebitFailed,
+
+    /// <summary>
+    /// The reconciliation background job exhausted its retry budget. See
+    /// docs/epics/08-reconciliation.md.
+    /// </summary>
+    ReconciliationFailed,
 }
 
 public record CreateTransferResult(CreateTransferOutcome Outcome, Transfer? Transfer);
@@ -54,6 +60,15 @@ public interface ITransferService
 
     /// <summary>Null if the transfer doesn't exist or wasn't sent by accountId.</summary>
     Task<Transfer?> GetOwnedByIdAsync(Guid accountId, Guid transferId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Resumes a PendingReconciliation transfer from after its debit step —
+    /// used by the reconciliation background job, which has no end-user
+    /// bearer token to re-run ownership checks with. See
+    /// docs/epics/08-reconciliation.md. Throws if transfer.Status isn't
+    /// PendingReconciliation.
+    /// </summary>
+    Task<Transfer> ResumeReconciliationAsync(Transfer transfer, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -72,7 +87,8 @@ public class TransferService(
     IWalletApiClient walletApiClient,
     ILedgerApiClient ledgerApiClient,
     INotificationApiClient notificationApiClient,
-    TransferPolicyOptions transferPolicyOptions) : ITransferService
+    TransferPolicyOptions transferPolicyOptions,
+    ReconciliationOptions reconciliationOptions) : ITransferService
 {
     public async Task<CreateTransferResult> CreateAsync(
         Guid accountId,
@@ -109,8 +125,12 @@ public class TransferService(
             // the same key, so steps already done just no-op/replay, and a
             // Failed transfer gets an honest fresh attempt rather than a
             // cached rejection that might no longer be accurate (e.g. the
-            // sender now has sufficient funds).
-            return existing.Status is TransferStatus.Completed or TransferStatus.SubmittedExternally
+            // sender now has sufficient funds). ReconciliationFailed is also
+            // terminal-for-replay purposes: the background job already gave
+            // up on it, so a client retry shouldn't silently re-attempt it
+            // outside that job's attempt-counting — see
+            // docs/epics/08-reconciliation.md.
+            return IsTerminal(existing.Status)
                 ? new CreateTransferResult(MapTerminalStatus(existing.Status), existing)
                 : await ExecuteAsync(existing, authorizationHeaderValue, cancellationToken);
         }
@@ -159,7 +179,7 @@ public class TransferService(
                 ?? throw new InvalidOperationException(
                     "Expected a transfer to exist after a unique-constraint conflict on IdempotencyKey.");
 
-            return raceWinner.Status is TransferStatus.Completed or TransferStatus.SubmittedExternally
+            return IsTerminal(raceWinner.Status)
                 ? new CreateTransferResult(MapTerminalStatus(raceWinner.Status), raceWinner)
                 : await ExecuteAsync(raceWinner, authorizationHeaderValue, cancellationToken);
         }
@@ -221,11 +241,15 @@ public class TransferService(
                 BankAccountNumber: beneficiary.BankAccountNumber);
     }
 
+    private static bool IsTerminal(TransferStatus status) =>
+        status is TransferStatus.Completed or TransferStatus.SubmittedExternally or TransferStatus.ReconciliationFailed;
+
     private static CreateTransferOutcome MapTerminalStatus(TransferStatus status) => status switch
     {
         TransferStatus.Completed => CreateTransferOutcome.Completed,
         TransferStatus.SubmittedExternally => CreateTransferOutcome.SubmittedExternally,
-        _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Not a terminal success status."),
+        TransferStatus.ReconciliationFailed => CreateTransferOutcome.ReconciliationFailed,
+        _ => throw new ArgumentOutOfRangeException(nameof(status), status, "Not a terminal status."),
     };
 
     private async Task<CreateTransferResult> ExecuteAsync(
@@ -415,10 +439,25 @@ public class TransferService(
                     nameof(debitResult.Outcome), debitResult.Outcome, "Unhandled WalletMutationOutcome.");
         }
 
-        // Debit succeeded — record the authoritative double-entry. From
-        // here on, money has left the sender; any failure (including the
-        // HTTP calls themselves throwing) is a reconciliation concern, not
-        // a clean rejection — we can no longer say nothing happened.
+        // Debit succeeded — everything from here on is shared with the
+        // reconciliation resume path (ResumeReconciliationAsync), which
+        // re-enters at exactly this point after re-resolving creditWalletId.
+        return await FinishAfterDebitAsync(transfer, creditWalletId, recipientAccountId, fee, cancellationToken);
+    }
+
+    /// <summary>
+    /// Everything after a successful debit: record the double-entry ledger,
+    /// credit the destination, charge the fee leg if any, then finalize.
+    /// From here on, money has left the sender; any failure (including the
+    /// HTTP calls themselves throwing) is a reconciliation concern, not a
+    /// clean rejection — we can no longer say nothing happened. Shared by
+    /// the normal post-debit flow and ResumeReconciliationAsync — see
+    /// docs/epics/08-reconciliation.md for why the resume path re-enters
+    /// here instead of re-running ExecuteAsync from the top.
+    /// </summary>
+    private async Task<CreateTransferResult> FinishAfterDebitAsync(
+        Transfer transfer, Guid creditWalletId, Guid? recipientAccountId, long fee, CancellationToken cancellationToken)
+    {
         try
         {
             var ledgerResult = await ledgerApiClient.RecordTransferAsync(
@@ -466,6 +505,7 @@ public class TransferService(
         transfer.Status = transfer.DestinationType == TransferDestinationType.InternalWallet
             ? TransferStatus.Completed
             : TransferStatus.SubmittedExternally;
+        transfer.FailureReason = null;
         transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await transferRepository.SaveChangesAsync(cancellationToken);
 
@@ -554,6 +594,72 @@ public class TransferService(
 
         transfer.FeeMinorUnits = fee;
         return null;
+    }
+
+    public async Task<Transfer> ResumeReconciliationAsync(Transfer transfer, CancellationToken cancellationToken)
+    {
+        if (transfer.Status != TransferStatus.PendingReconciliation)
+        {
+            throw new InvalidOperationException(
+                $"Cannot resume transfer {transfer.Id}: expected PendingReconciliation, was {transfer.Status}.");
+        }
+
+        transfer.ReconciliationAttempts++;
+
+        if (transfer.ReconciliationAttempts > reconciliationOptions.MaxAttempts)
+        {
+            transfer.Status = TransferStatus.ReconciliationFailed;
+            transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await transferRepository.SaveChangesAsync(cancellationToken);
+
+            await notificationApiClient.NotifyAsync(
+                transfer.AccountId,
+                NotificationType.TransferFailed,
+                $"Your transfer of {transfer.AmountMinorUnits} {transfer.Currency} could not be reconciled " +
+                $"after {reconciliationOptions.MaxAttempts} attempts and needs manual review: {transfer.FailureReason}",
+                transfer.Id,
+                cancellationToken);
+
+            return transfer;
+        }
+
+        await transferRepository.SaveChangesAsync(cancellationToken);
+
+        var (creditWalletId, recipientAccountId) = await ResolveCreditDestinationForResumeAsync(transfer, cancellationToken);
+        var fee = transfer.DestinationType == TransferDestinationType.ExternalBank
+            ? transferPolicyOptions.ExternalTransferFeeMinorUnits
+            : 0;
+
+        var result = await FinishAfterDebitAsync(transfer, creditWalletId, recipientAccountId, fee, cancellationToken);
+
+        return result.Transfer!;
+    }
+
+    /// <summary>
+    /// Re-resolves where the main transfer's credit leg goes, trusting
+    /// invariants already proven true the first time this transfer's debit
+    /// succeeded (wallets are never deleted in this system, and a wallet's
+    /// currency never changes) — so unlike the fresh-attempt path in
+    /// ExecuteAsync, this does not re-check currency or re-fetch the sender.
+    /// See docs/epics/08-reconciliation.md.
+    /// </summary>
+    private async Task<(Guid CreditWalletId, Guid? RecipientAccountId)> ResolveCreditDestinationForResumeAsync(
+        Transfer transfer, CancellationToken cancellationToken)
+    {
+        if (transfer.DestinationType == TransferDestinationType.InternalWallet)
+        {
+            var toWallet = await walletApiClient.GetWalletAsync(transfer.ToWalletId!.Value, cancellationToken)
+                ?? throw new InvalidOperationException(
+                    $"Recipient wallet {transfer.ToWalletId} for transfer {transfer.Id} is missing during " +
+                    "reconciliation resume — wallets are never deleted in this system, so this indicates data corruption.");
+
+            return (toWallet.Id, toWallet.AccountId);
+        }
+
+        var externalSettlementWalletId = await walletApiClient.GetOrCreateSystemWalletIdAsync(
+            SystemAccountIds.ExternalSettlement, transfer.Currency, cancellationToken);
+
+        return (externalSettlementWalletId, null);
     }
 
     private static string SenderSentMessage(Transfer transfer) => transfer.DestinationType switch

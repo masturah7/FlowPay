@@ -108,6 +108,11 @@ public class TransfersController(ITransferService transferService) : ControllerB
                 "Transfer did not complete",
                 "The transfer could not be completed. No funds were moved — safe to retry with the same Idempotency-Key.",
                 errorCode: nameof(CreateTransferOutcome.DebitFailed)),
+            CreateTransferOutcome.ReconciliationFailed => this.ProblemWithErrorCode(
+                StatusCodes.Status409Conflict,
+                "Reconciliation failed",
+                "This transfer could not be automatically reconciled and needs manual review. Retrying will not help.",
+                errorCode: nameof(CreateTransferOutcome.ReconciliationFailed)),
             _ => throw new ArgumentOutOfRangeException(
                 nameof(result.Outcome), result.Outcome, "Unhandled CreateTransferOutcome."),
         };

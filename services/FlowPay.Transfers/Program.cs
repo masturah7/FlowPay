@@ -26,6 +26,11 @@ var transferPolicyOptions = builder.Configuration.GetSection(TransferPolicyOptio
     ?? throw new InvalidOperationException($"Missing configuration section '{TransferPolicyOptions.SectionName}'.");
 builder.Services.AddSingleton(transferPolicyOptions);
 
+var reconciliationOptions = builder.Configuration.GetSection(ReconciliationOptions.SectionName).Get<ReconciliationOptions>()
+    ?? throw new InvalidOperationException($"Missing configuration section '{ReconciliationOptions.SectionName}'.");
+builder.Services.AddSingleton(reconciliationOptions);
+builder.Services.AddHostedService<ReconciliationBackgroundService>();
+
 builder.Services.AddDbContext<TransfersDbContext>(options => options.UseNpgsql(connectionString));
 builder.Services.AddScoped<ITransferRepository, TransferRepository>();
 builder.Services.AddScoped<ITransferService, TransferService>();

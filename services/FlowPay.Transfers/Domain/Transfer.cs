@@ -25,6 +25,14 @@ public enum TransferStatus
     /// docs/epics/07-external-transfers-beneficiaries-fees-limits.md.
     /// </summary>
     SubmittedExternally,
+
+    /// <summary>
+    /// Terminal — the reconciliation background job exhausted
+    /// Reconciliation:MaxAttempts without resolving this transfer. Needs a
+    /// human; the job will not retry it again. See
+    /// docs/epics/08-reconciliation.md.
+    /// </summary>
+    ReconciliationFailed,
 }
 
 public enum TransferDestinationType
@@ -86,6 +94,12 @@ public class Transfer
     public TransferStatus Status { get; set; }
 
     public string? FailureReason { get; set; }
+
+    /// <summary>
+    /// Number of times the reconciliation background job has attempted to
+    /// resume this transfer. See docs/epics/08-reconciliation.md.
+    /// </summary>
+    public int ReconciliationAttempts { get; set; }
 
     public required string IdempotencyKey { get; init; }
 

@@ -22,6 +22,17 @@ public interface ITransferRepository : IRepository<Transfer, Guid>
     /// </summary>
     Task<long> GetSentAmountSinceAsync(
         Guid accountId, DateTimeOffset sinceUtc, Guid excludeTransferId, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// PendingReconciliation transfers with at most maxAttempts resume
+    /// attempts so far, oldest first. Deliberately "&lt;=", not "&lt;": a
+    /// transfer that has used exactly maxAttempts must still be fetched once
+    /// more so ResumeReconciliationAsync's own "&gt; maxAttempts" check can
+    /// fire and move it to ReconciliationFailed — otherwise it would stop
+    /// being picked up without ever reaching that terminal state. See
+    /// docs/epics/08-reconciliation.md.
+    /// </summary>
+    Task<List<Transfer>> GetPendingReconciliationAsync(int maxAttempts, CancellationToken cancellationToken);
 }
 
 public class TransferRepository(TransfersDbContext dbContext)
@@ -29,7 +40,10 @@ public class TransferRepository(TransfersDbContext dbContext)
 {
     private static readonly TransferStatus[] MoneyMovedStatuses =
     [
-        TransferStatus.Completed, TransferStatus.SubmittedExternally, TransferStatus.PendingReconciliation,
+        TransferStatus.Completed,
+        TransferStatus.SubmittedExternally,
+        TransferStatus.PendingReconciliation,
+        TransferStatus.ReconciliationFailed,
     ];
 
     public Task<Transfer?> GetByIdempotencyKeyAsync(string idempotencyKey, CancellationToken cancellationToken) =>
@@ -53,4 +67,9 @@ public class TransferRepository(TransfersDbContext dbContext)
 
         return sum ?? 0L;
     }
+
+    public Task<List<Transfer>> GetPendingReconciliationAsync(int maxAttempts, CancellationToken cancellationToken) =>
+        Set.Where(t => t.Status == TransferStatus.PendingReconciliation && t.ReconciliationAttempts <= maxAttempts)
+            .OrderBy(t => t.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
 }
