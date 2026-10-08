@@ -8,7 +8,9 @@ services:
       - ASPNETCORE_ENVIRONMENT=Development
       - ASPNETCORE_HTTP_PORTS=8080
     ports:
-      - "8080:8080"
+      # Host 8080 is taken by an unrelated process on this machine —
+      # publish on 8086 instead. Container-internal port stays 8080.
+      - "8086:8080"
     depends_on:
       - flowpay-identity
       - flowpay-wallet
@@ -82,7 +84,6 @@ services:
     networks:
       - flowpay-network
 
-  # No database dependency (yet) — doesn't need flowpay-db healthy first.
   flowpay-notifications:
     build:
       context: .
@@ -93,6 +94,9 @@ services:
       - ASPNETCORE_HTTP_PORTS=8080
     ports:
       - "8085:8080"
+    depends_on:
+      flowpay-db:
+        condition: service_healthy
     networks:
       - flowpay-network
 
@@ -107,7 +111,7 @@ services:
       - POSTGRES_USER=flowpay
       - POSTGRES_PASSWORD=flowpay
       - POSTGRES_DB=flowpay
-      - POSTGRES_MULTIPLE_DATABASES=flowpay_identity,flowpay_wallet,flowpay_ledger,flowpay_transfers
+      - POSTGRES_MULTIPLE_DATABASES=flowpay_identity,flowpay_wallet,flowpay_ledger,flowpay_transfers,flowpay_notifications
     ports:
       - "5432:5432"
     volumes:

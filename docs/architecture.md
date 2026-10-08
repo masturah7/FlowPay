@@ -21,9 +21,12 @@ value type are implemented exactly once rather than copy-pasted per service.
 
 ## Request flow
 
-External clients only ever talk to `FlowPay.Gateway` on port 8080. The
+External clients only ever talk to `FlowPay.Gateway`, published on host port
+8086 (remapped from the conventional 8080 because something else on the
+dev machine already holds that port — see `docker-compose.yml`). The
 gateway strips a path prefix and forwards to the owning service over the
-internal Docker network (`flowpay-network`) — see
+internal Docker network (`flowpay-network`) on each service's
+container-internal port 8080 — see
 `services/FlowPay.Gateway/appsettings.json` for the route/cluster config:
 
 ```

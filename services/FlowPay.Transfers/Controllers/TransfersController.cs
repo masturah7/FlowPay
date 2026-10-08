@@ -87,4 +87,42 @@ public class TransfersController(ITransferService transferService) : ControllerB
                 nameof(result.Outcome), result.Outcome, "Unhandled CreateTransferOutcome."),
         };
     }
+
+    [HttpGet]
+    [ProducesResponseType(typeof(List<TransferResponse>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetMine(CancellationToken cancellationToken)
+    {
+        var accountId = User.GetAccountId();
+
+        if (accountId is null)
+        {
+            return this.UnauthenticatedProblem();
+        }
+
+        var transfers = await transferService.GetMineAsync(accountId.Value, cancellationToken);
+
+        return Ok(transfers.Select(TransferResponse.From));
+    }
+
+    [HttpGet("{id:guid}")]
+    [ProducesResponseType(typeof(TransferResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetById(Guid id, CancellationToken cancellationToken)
+    {
+        var accountId = User.GetAccountId();
+
+        if (accountId is null)
+        {
+            return this.UnauthenticatedProblem();
+        }
+
+        var transfer = await transferService.GetOwnedByIdAsync(accountId.Value, id, cancellationToken);
+
+        if (transfer is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(TransferResponse.From(transfer));
+    }
 }

@@ -45,6 +45,15 @@ public interface IWalletService
     Task<Domain.Wallet?> GetOwnedByIdAsync(Guid accountId, Guid walletId, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Null if the wallet doesn't exist or isn't owned by accountId (same
+    /// "don't confirm existence of someone else's wallet" rule as
+    /// GetOwnedByIdAsync); otherwise the wallet's ledger entries, newest
+    /// first — possibly empty.
+    /// </summary>
+    Task<List<WalletLedgerEntry>?> GetTransactionHistoryAsync(
+        Guid accountId, Guid walletId, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Internal-only: looks up any wallet by id, no ownership check. Used
     /// by FlowPay.Transfers to validate a transfer recipient's wallet
     /// (which the sender doesn't own) exists and get its currency.
@@ -139,6 +148,19 @@ public class WalletService(IWalletRepository walletRepository) : IWalletService
 
     public Task<Domain.Wallet?> GetByIdAsync(Guid walletId, CancellationToken cancellationToken) =>
         walletRepository.GetByIdAsync(walletId, cancellationToken);
+
+    public async Task<List<WalletLedgerEntry>?> GetTransactionHistoryAsync(
+        Guid accountId, Guid walletId, CancellationToken cancellationToken)
+    {
+        var wallet = await walletRepository.GetByIdAsync(walletId, cancellationToken);
+
+        if (wallet is null || wallet.AccountId != accountId)
+        {
+            return null;
+        }
+
+        return await walletRepository.GetLedgerEntriesByWalletIdAsync(walletId, cancellationToken);
+    }
 
     public async Task<FundWalletResult> FundAsync(
         Guid accountId,

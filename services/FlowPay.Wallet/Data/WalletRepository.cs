@@ -12,6 +12,8 @@ public interface IWalletRepository : IRepository<Domain.Wallet, Guid>
 
     Task<WalletLedgerEntry?> GetLedgerEntryByIdempotencyKeyAsync(
         Guid walletId, string idempotencyKey, CancellationToken cancellationToken);
+
+    Task<List<WalletLedgerEntry>> GetLedgerEntriesByWalletIdAsync(Guid walletId, CancellationToken cancellationToken);
 }
 
 public class WalletRepository(WalletDbContext dbContext)
@@ -27,4 +29,11 @@ public class WalletRepository(WalletDbContext dbContext)
         dbContext.WalletLedgerEntries.SingleOrDefaultAsync(
             e => e.WalletId == walletId && e.IdempotencyKey == idempotencyKey,
             cancellationToken);
+
+    public Task<List<WalletLedgerEntry>> GetLedgerEntriesByWalletIdAsync(
+        Guid walletId, CancellationToken cancellationToken) =>
+        dbContext.WalletLedgerEntries
+            .Where(e => e.WalletId == walletId)
+            .OrderByDescending(e => e.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
 }

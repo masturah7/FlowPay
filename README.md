@@ -64,18 +64,24 @@ the data access layer. Default Postgres credentials in `docker-compose.yml`
 are for local development only — do not reuse them anywhere real.
 
 Only the gateway is published for external use — everything else is reached
-through it:
+through it (except `FlowPay.Ledger`, which is internal-only and isn't
+gateway-routed at all — see [Architecture](docs/architecture.md)):
 
-| Service | Reachable via gateway (`http://localhost:8080`) | Direct (dev only) |
+| Service | Reachable via gateway (`http://localhost:8086`) | Direct (dev only) |
 |---|---|---|
-| Gateway | — | `:8080` |
+| Gateway | — | `:8086` (remapped from 8080 — see note below) |
 | Identity | `/identity/*` | `:8081` |
-| Wallet | `/wallets/*` | `:8082` |
-| Ledger | `/ledger/*` | `:8083` |
+| Wallet | `/wallets/api/v1/wallets/*`, `/wallets/health/*` | `:8082` |
+| Ledger | — (internal-only, not gateway-routed) | `:8083` |
 | Transfers | `/transfers/*` | `:8084` |
 | Notifications | `/notifications/*` | `:8085` |
 
 Each service also exposes `/health/live` and `/health/ready`.
+
+> **Port note:** The gateway is published on **8086**, not the conventional
+> 8080, because 8080 was already held by an unrelated process on the
+> machine this was built on. If 8080 is free on yours, you can change it
+> back in `docker-compose.yml` (`flowpay-gateway`'s `ports:` entry).
 
 <!-- For local iteration on a single service without Docker, e.g. fast
      edit/test loops: -->

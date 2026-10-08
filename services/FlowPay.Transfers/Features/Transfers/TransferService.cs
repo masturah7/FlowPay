@@ -37,6 +37,11 @@ public interface ITransferService
         string authorizationHeaderValue,
         string idempotencyKey,
         CancellationToken cancellationToken);
+
+    Task<List<Transfer>> GetMineAsync(Guid accountId, CancellationToken cancellationToken);
+
+    /// <summary>Null if the transfer doesn't exist or wasn't sent by accountId.</summary>
+    Task<Transfer?> GetOwnedByIdAsync(Guid accountId, Guid transferId, CancellationToken cancellationToken);
 }
 
 /// <summary>
@@ -49,7 +54,8 @@ public interface ITransferService
 public class TransferService(
     ITransferRepository transferRepository,
     IWalletApiClient walletApiClient,
-    ILedgerApiClient ledgerApiClient) : ITransferService
+    ILedgerApiClient ledgerApiClient,
+    INotificationApiClient notificationApiClient) : ITransferService
 {
     public async Task<CreateTransferResult> CreateAsync(
         Guid accountId,
@@ -127,6 +133,15 @@ public class TransferService(
         }
 
         return await ExecuteAsync(transfer, authorizationHeaderValue, cancellationToken);
+    }
+
+    public Task<List<Transfer>> GetMineAsync(Guid accountId, CancellationToken cancellationToken) =>
+        transferRepository.GetByAccountIdAsync(accountId, cancellationToken);
+
+    public async Task<Transfer?> GetOwnedByIdAsync(Guid accountId, Guid transferId, CancellationToken cancellationToken)
+    {
+        var transfer = await transferRepository.GetByIdAsync(transferId, cancellationToken);
+        return transfer is not null && transfer.AccountId == accountId ? transfer : null;
     }
 
     private async Task<CreateTransferResult> ExecuteAsync(
@@ -279,6 +294,19 @@ public class TransferService(
         transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await transferRepository.SaveChangesAsync(cancellationToken);
 
+        await notificationApiClient.NotifyAsync(
+            transfer.AccountId,
+            NotificationType.TransferSent,
+            $"You sent {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
+            transfer.Id,
+            cancellationToken);
+        await notificationApiClient.NotifyAsync(
+            toWallet.AccountId,
+            NotificationType.TransferReceived,
+            $"You received {transfer.AmountMinorUnits} {transfer.Currency} (transfer {transfer.Id}).",
+            transfer.Id,
+            cancellationToken);
+
         return new CreateTransferResult(CreateTransferOutcome.Completed, transfer);
     }
 
@@ -290,6 +318,13 @@ public class TransferService(
         transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await transferRepository.SaveChangesAsync(cancellationToken);
 
+        await notificationApiClient.NotifyAsync(
+            transfer.AccountId,
+            NotificationType.TransferFailed,
+            $"Your transfer of {transfer.AmountMinorUnits} {transfer.Currency} failed: {reason}",
+            transfer.Id,
+            cancellationToken);
+
         return new CreateTransferResult(outcome, transfer);
     }
 
@@ -300,6 +335,13 @@ public class TransferService(
         transfer.FailureReason = reason;
         transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
         await transferRepository.SaveChangesAsync(cancellationToken);
+
+        await notificationApiClient.NotifyAsync(
+            transfer.AccountId,
+            NotificationType.TransferPendingReconciliation,
+            $"Your transfer of {transfer.AmountMinorUnits} {transfer.Currency} is being reconciled: {reason}",
+            transfer.Id,
+            cancellationToken);
 
         return new CreateTransferResult(CreateTransferOutcome.PendingReconciliation, transfer);
     }

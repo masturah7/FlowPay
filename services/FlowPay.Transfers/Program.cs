@@ -28,6 +28,8 @@ var walletBaseUrl = builder.Configuration["Services:Wallet"]
     ?? throw new InvalidOperationException("Missing configuration 'Services:Wallet'.");
 var ledgerBaseUrl = builder.Configuration["Services:Ledger"]
     ?? throw new InvalidOperationException("Missing configuration 'Services:Ledger'.");
+var notificationsBaseUrl = builder.Configuration["Services:Notifications"]
+    ?? throw new InvalidOperationException("Missing configuration 'Services:Notifications'.");
 
 builder.Services.AddHttpClient<IWalletApiClient, WalletApiClient>(client =>
 {
@@ -36,6 +38,10 @@ builder.Services.AddHttpClient<IWalletApiClient, WalletApiClient>(client =>
 builder.Services.AddHttpClient<ILedgerApiClient, LedgerApiClient>(client =>
 {
     client.BaseAddress = new Uri(ledgerBaseUrl);
+});
+builder.Services.AddHttpClient<INotificationApiClient, NotificationApiClient>(client =>
+{
+    client.BaseAddress = new Uri(notificationsBaseUrl);
 });
 
 builder.Services.AddFlowPayHealthChecks()

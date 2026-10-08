@@ -130,4 +130,26 @@ public class WalletsController(IWalletService walletService) : ControllerBase
                 nameof(result.Outcome), result.Outcome, "Unhandled FundWalletOutcome."),
         };
     }
+
+    [HttpGet("{id:guid}/transactions")]
+    [ProducesResponseType(typeof(List<WalletTransactionResponse>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetTransactions(Guid id, CancellationToken cancellationToken)
+    {
+        var accountId = User.GetAccountId();
+
+        if (accountId is null)
+        {
+            return this.UnauthenticatedProblem();
+        }
+
+        var entries = await walletService.GetTransactionHistoryAsync(accountId.Value, id, cancellationToken);
+
+        if (entries is null)
+        {
+            return NotFound();
+        }
+
+        return Ok(entries.Select(WalletTransactionResponse.From));
+    }
 }
