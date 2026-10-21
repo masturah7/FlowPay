@@ -1,4 +1,5 @@
 using FlowPay.BuildingBlocks;
+using FlowPay.Identity;
 using FlowPay.Identity.Data;
 using FlowPay.Identity.Domain;
 using FlowPay.Identity.Features.Accounts;
@@ -22,6 +23,10 @@ builder.Services.AddFlowPayApiVersioning();
 builder.Services.AddFlowPayProblemDetails();
 builder.Services.AddFlowPayJwtBearer(builder.Configuration);
 builder.Services.AddFlowPayInternalApiKey(builder.Configuration);
+
+var adminBootstrapOptions = builder.Configuration.GetSection(AdminBootstrapOptions.SectionName).Get<AdminBootstrapOptions>()
+    ?? throw new InvalidOperationException($"Missing configuration section '{AdminBootstrapOptions.SectionName}'.");
+builder.Services.AddSingleton(adminBootstrapOptions);
 
 builder.Services.AddDbContext<IdentityDbContext>(options => options.UseNpgsql(connectionString));
 builder.Services.AddScoped<IPasswordHasher<Account>, PasswordHasher<Account>>();

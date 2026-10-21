@@ -1,5 +1,6 @@
 using FlowPay.Identity.Data;
 using FlowPay.Identity.Domain;
+using FlowPay.Identity;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -37,7 +38,8 @@ public interface IAccountService
 /// and "what does a successful registration return" get decided; the
 /// repository below it just knows how to fetch/add/save Account rows.
 /// </summary>
-public class AccountService(IAccountRepository accountRepository, IPasswordHasher<Account> passwordHasher)
+public class AccountService(
+    IAccountRepository accountRepository, IPasswordHasher<Account> passwordHasher, AdminBootstrapOptions adminBootstrapOptions)
     : IAccountService
 {
     public async Task<RegisterAccountResult> RegisterAsync(
@@ -53,6 +55,7 @@ public class AccountService(IAccountRepository accountRepository, IPasswordHashe
             Email = normalizedEmail,
             PasswordHash = string.Empty,
             Status = AccountStatus.PendingVerification,
+            IsAdmin = adminBootstrapOptions.Emails.Any(e => NormalizeEmail(e) == normalizedEmail),
             CreatedAtUtc = DateTimeOffset.UtcNow,
         };
         account.PasswordHash = passwordHasher.HashPassword(account, password);

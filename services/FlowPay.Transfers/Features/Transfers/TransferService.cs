@@ -69,7 +69,30 @@ public interface ITransferService
     /// PendingReconciliation.
     /// </summary>
     Task<Transfer> ResumeReconciliationAsync(Transfer transfer, CancellationToken cancellationToken);
+
+    /// <summary>Admin search across all accounts, optionally filtered by status. See docs/epics/09-admin-ops-tooling.md.</summary>
+    Task<List<Transfer>> AdminSearchAsync(TransferStatus? status, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Admin-triggered immediate retry. Valid for PendingReconciliation
+    /// (resumes right away instead of waiting for the next sweep) and
+    /// ReconciliationFailed (resets ReconciliationAttempts to 0 and status
+    /// to PendingReconciliation first, giving it a fresh retry budget, then
+    /// resumes). See docs/epics/09-admin-ops-tooling.md.
+    /// </summary>
+    Task<AdminForceRetryResult> AdminForceRetryReconciliationAsync(Guid transferId, CancellationToken cancellationToken);
 }
+
+public enum AdminForceRetryOutcome
+{
+    Retried,
+    TransferNotFound,
+
+    /// <summary>Not PendingReconciliation or ReconciliationFailed — nothing to retry.</summary>
+    NotInReconciliation,
+}
+
+public record AdminForceRetryResult(AdminForceRetryOutcome Outcome, Transfer? Transfer);
 
 /// <summary>
 /// Orchestrates one transfer across FlowPay.Wallet, FlowPay.Ledger, and (for
@@ -194,6 +217,39 @@ public class TransferService(
     {
         var transfer = await transferRepository.GetByIdAsync(transferId, cancellationToken);
         return transfer is not null && transfer.AccountId == accountId ? transfer : null;
+    }
+
+    public Task<List<Transfer>> AdminSearchAsync(TransferStatus? status, CancellationToken cancellationToken) =>
+        transferRepository.GetAllAsync(status, cancellationToken);
+
+    public async Task<AdminForceRetryResult> AdminForceRetryReconciliationAsync(
+        Guid transferId, CancellationToken cancellationToken)
+    {
+        var transfer = await transferRepository.GetByIdAsync(transferId, cancellationToken);
+
+        if (transfer is null)
+        {
+            return new AdminForceRetryResult(AdminForceRetryOutcome.TransferNotFound, null);
+        }
+
+        if (transfer.Status == TransferStatus.ReconciliationFailed)
+        {
+            // Give it a fresh retry budget — an operator vouching for a
+            // retry here is the designed escape hatch for a transfer the
+            // background job already gave up on.
+            transfer.Status = TransferStatus.PendingReconciliation;
+            transfer.ReconciliationAttempts = 0;
+            transfer.UpdatedAtUtc = DateTimeOffset.UtcNow;
+            await transferRepository.SaveChangesAsync(cancellationToken);
+        }
+        else if (transfer.Status != TransferStatus.PendingReconciliation)
+        {
+            return new AdminForceRetryResult(AdminForceRetryOutcome.NotInReconciliation, transfer);
+        }
+
+        var resumed = await ResumeReconciliationAsync(transfer, cancellationToken);
+
+        return new AdminForceRetryResult(AdminForceRetryOutcome.Retried, resumed);
     }
 
     private enum ResolveDestinationOutcome

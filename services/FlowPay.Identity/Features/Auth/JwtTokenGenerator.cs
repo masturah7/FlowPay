@@ -19,12 +19,17 @@ public class JwtTokenGenerator(JwtOptions jwtOptions) : IJwtTokenGenerator
         var now = DateTimeOffset.UtcNow;
         var expiresAt = now.AddMinutes(jwtOptions.AccessTokenLifetimeMinutes);
 
-        var claims = new[]
+        var claims = new List<Claim>
         {
-            new Claim(JwtRegisteredClaimNames.Sub, account.Id.ToString()),
-            new Claim(JwtRegisteredClaimNames.Email, account.Email),
-            new Claim(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
+            new(JwtRegisteredClaimNames.Sub, account.Id.ToString()),
+            new(JwtRegisteredClaimNames.Email, account.Email),
+            new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString()),
         };
+
+        if (account.IsAdmin)
+        {
+            claims.Add(new Claim(FlowPayClaimTypes.IsAdmin, "true"));
+        }
 
         var signingKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(jwtOptions.SigningKey));
         var credentials = new SigningCredentials(signingKey, SecurityAlgorithms.HmacSha256);

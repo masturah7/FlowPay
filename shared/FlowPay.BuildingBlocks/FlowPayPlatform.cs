@@ -86,7 +86,10 @@ public static class FlowPayPlatform
                 };
             });
 
-        services.AddAuthorization();
+        services.AddAuthorization(options =>
+        {
+            options.AddPolicy("Admin", policy => policy.RequireClaim(FlowPayClaimTypes.IsAdmin, "true"));
+        });
 
         return services;
     }

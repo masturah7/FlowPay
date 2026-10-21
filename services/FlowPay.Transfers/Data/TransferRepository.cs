@@ -33,6 +33,13 @@ public interface ITransferRepository : IRepository<Transfer, Guid>
     /// docs/epics/08-reconciliation.md.
     /// </summary>
     Task<List<Transfer>> GetPendingReconciliationAsync(int maxAttempts, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Admin search across all accounts, optionally filtered by status,
+    /// newest first, capped at 200 — no pagination yet, see
+    /// docs/epics/09-admin-ops-tooling.md.
+    /// </summary>
+    Task<List<Transfer>> GetAllAsync(TransferStatus? status, CancellationToken cancellationToken);
 }
 
 public class TransferRepository(TransfersDbContext dbContext)
@@ -71,5 +78,11 @@ public class TransferRepository(TransfersDbContext dbContext)
     public Task<List<Transfer>> GetPendingReconciliationAsync(int maxAttempts, CancellationToken cancellationToken) =>
         Set.Where(t => t.Status == TransferStatus.PendingReconciliation && t.ReconciliationAttempts <= maxAttempts)
             .OrderBy(t => t.CreatedAtUtc)
+            .ToListAsync(cancellationToken);
+
+    public Task<List<Transfer>> GetAllAsync(TransferStatus? status, CancellationToken cancellationToken) =>
+        Set.Where(t => status == null || t.Status == status)
+            .OrderByDescending(t => t.CreatedAtUtc)
+            .Take(200)
             .ToListAsync(cancellationToken);
 }

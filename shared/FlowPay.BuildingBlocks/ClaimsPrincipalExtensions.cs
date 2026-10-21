@@ -16,4 +16,8 @@ public static class ClaimsPrincipalExtensions
         var subject = principal.FindFirst(JwtRegisteredClaimNames.Sub)?.Value;
         return Guid.TryParse(subject, out var accountId) ? accountId : null;
     }
+
+    /// <summary>True only if the token carries FlowPayClaimTypes.IsAdmin = "true".</summary>
+    public static bool IsAdmin(this ClaimsPrincipal principal) =>
+        principal.FindFirst(FlowPayClaimTypes.IsAdmin)?.Value == "true";
 }
